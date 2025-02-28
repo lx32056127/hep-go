@@ -176,8 +176,6 @@ func (hepMsg *HepMsg) parseHep2(udpPacket []byte) error {
 		if hepMsg.SipMsg.Error != nil {
 			return hepMsg.SipMsg.Error
 		}
-	} else {
-
 	}
 
 	return nil
@@ -225,6 +223,12 @@ func (hepMsg *HepMsg) parseHep3(udpPacket []byte) error {
 			hepMsg.AuthenticateKey = string(chunkBody)
 		case PacketPayload:
 			hepMsg.Body += string(chunkBody)
+			if len(chunkBody) > 24 {
+				hepMsg.SipMsg = sipparser.ParseMsg(string(chunkBody))
+				if hepMsg.SipMsg.Error != nil {
+					return hepMsg.SipMsg.Error
+				}
+			}
 		case CompressedPayload:
 		case InternalC:
 		default:
