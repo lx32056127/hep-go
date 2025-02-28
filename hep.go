@@ -10,7 +10,7 @@ import (
 	"errors"
 	"net"
 
-	"github.com/dgv/sipparser"
+	"github.com/james4e/sipparser"
 )
 
 /*************************************
