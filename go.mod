@@ -1,4 +1,4 @@
-module hep-go
+module github.com/lx32056127/hep-go
 
 go 1.22.11
 
