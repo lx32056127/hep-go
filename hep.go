@@ -105,13 +105,25 @@ type HepMsg struct {
 	AuthenticateKey       string
 	Body                  string
 	SipMsg                *sipparser.SipMsg
-	//SipMsg	*sip.SipMsg
 }
 
 // NewHepMsg returns a parsed message object. Takes a byte slice.
-func NewHepMsg(packet []byte) (*HepMsg, error) {
+func NewHepMsg(packet []byte) (hMsg *HepMsg, err error) {
+	// 使用 defer 和 recover 捕获恐慌
+	defer func() {
+		if r := recover(); r != nil {
+			// 恢复后记录错误
+			// 这里可以根据需要做更多的日志记录或者错误处理
+			if e, ok := r.(error); ok {
+				err = e
+			}
+			// 如果是其他类型的panic，返回一个通用错误
+			err = errors.New("Recovered from panic in HEP parsing")
+		}
+	}()
+
 	newHepMsg := &HepMsg{}
-	err := newHepMsg.parse(packet)
+	err = newHepMsg.parse(packet)
 	if err != nil {
 		return nil, err
 	}
@@ -119,7 +131,6 @@ func NewHepMsg(packet []byte) (*HepMsg, error) {
 }
 
 func (hepMsg *HepMsg) parse(udpPacket []byte) error {
-
 	switch udpPacket[0] {
 	case 0x01:
 		return hepMsg.parseHep1(udpPacket)
