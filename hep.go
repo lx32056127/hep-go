@@ -193,56 +193,109 @@ func (hepMsg *HepMsg) parseHep2(udpPacket []byte) error {
 }
 
 func (hepMsg *HepMsg) parseHep3(udpPacket []byte) error {
+	// Check if packet length is sufficient
+	if len(udpPacket) < 6 {
+		return errors.New("HEP3 packet length is insufficient")
+	}
+
 	length := binary.BigEndian.Uint16(udpPacket[4:6])
+
+	// Validate packet length
+	if uint16(len(udpPacket)) < length {
+		return errors.New("HEP3 packet length is less than declared length")
+	}
+
 	currentByte := uint16(6)
 
 	for currentByte < length {
-		hepChunk := udpPacket[currentByte:]
-		//chunkVendorId := binary.BigEndian.Uint16(hepChunk[:2])
-		chunkType := binary.BigEndian.Uint16(hepChunk[2:4])
-		chunkLength := binary.BigEndian.Uint16(hepChunk[4:6])
-		chunkBody := hepChunk[6:chunkLength]
+		// Check if remaining data is sufficient to read
+		if length-currentByte < 6 {
+			return errors.New("Incomplete chunk header in HEP3 packet")
+		}
+
+		// Direct index access instead of creating new slices
+		//chunkVendorId := binary.BigEndian.Uint16(udpPacket[currentByte:currentByte+2])
+		chunkType := binary.BigEndian.Uint16(udpPacket[currentByte+2 : currentByte+4])
+		chunkLength := binary.BigEndian.Uint16(udpPacket[currentByte+4 : currentByte+6])
+
+		// Validate chunk length
+		if chunkLength < 6 {
+			return errors.New("Invalid HEP3 chunk length")
+		}
+
+		// Ensure remaining data is sufficient
+		if currentByte+chunkLength > length {
+			return errors.New("HEP3 chunk exceeds packet boundary")
+		}
+
+		// Use original data segments directly instead of creating new slices
+		chunkBodyStart := currentByte + 6
+		chunkBodyEnd := currentByte + chunkLength
 
 		switch chunkType {
 		case IPProtocolFamily:
-			hepMsg.IPProtocolFamily = chunkBody[0]
+			if chunkBodyEnd > chunkBodyStart {
+				hepMsg.IPProtocolFamily = udpPacket[chunkBodyStart]
+			}
 		case IPProtocolID:
-			hepMsg.IPProtocolID = chunkBody[0]
+			if chunkBodyEnd > chunkBodyStart {
+				hepMsg.IPProtocolID = udpPacket[chunkBodyStart]
+			}
 		case IP4SourceAddress:
-			hepMsg.IP4SourceAddress = net.IP(chunkBody).String()
+			hepMsg.IP4SourceAddress = net.IP(udpPacket[chunkBodyStart:chunkBodyEnd]).String()
 		case IP4DestinationAddress:
-			hepMsg.IP4DestinationAddress = net.IP(chunkBody).String()
+			hepMsg.IP4DestinationAddress = net.IP(udpPacket[chunkBodyStart:chunkBodyEnd]).String()
 		case IP6SourceAddress:
-			hepMsg.IP6SourceAddress = net.IP(chunkBody).String()
+			hepMsg.IP6SourceAddress = net.IP(udpPacket[chunkBodyStart:chunkBodyEnd]).String()
 		case IP6DestinationAddress:
-			hepMsg.IP4DestinationAddress = net.IP(chunkBody).String()
+			hepMsg.IP6DestinationAddress = net.IP(udpPacket[chunkBodyStart:chunkBodyEnd]).String()
 		case SourcePort:
-			hepMsg.SourcePort = binary.BigEndian.Uint16(chunkBody)
+			if chunkBodyEnd-chunkBodyStart >= 2 {
+				hepMsg.SourcePort = binary.BigEndian.Uint16(udpPacket[chunkBodyStart:chunkBodyEnd])
+			}
 		case DestinationPort:
-			hepMsg.DestinationPort = binary.BigEndian.Uint16(chunkBody)
+			if chunkBodyEnd-chunkBodyStart >= 2 {
+				hepMsg.DestinationPort = binary.BigEndian.Uint16(udpPacket[chunkBodyStart:chunkBodyEnd])
+			}
 		case Timestamp:
-			hepMsg.Timestamp = binary.BigEndian.Uint32(chunkBody)
+			if chunkBodyEnd-chunkBodyStart >= 4 {
+				hepMsg.Timestamp = binary.BigEndian.Uint32(udpPacket[chunkBodyStart:chunkBodyEnd])
+			}
 		case TimestampMicro:
-			hepMsg.TimestampMicro = binary.BigEndian.Uint32(chunkBody)
+			if chunkBodyEnd-chunkBodyStart >= 4 {
+				hepMsg.TimestampMicro = binary.BigEndian.Uint32(udpPacket[chunkBodyStart:chunkBodyEnd])
+			}
 		case ProtocolType:
-			hepMsg.ProtocolType = chunkBody[0]
+			if chunkBodyEnd > chunkBodyStart {
+				hepMsg.ProtocolType = udpPacket[chunkBodyStart]
+			}
 		case CaptureAgentID:
-			hepMsg.CaptureAgentID = binary.BigEndian.Uint16(chunkBody)
+			if chunkBodyEnd-chunkBodyStart >= 2 {
+				hepMsg.CaptureAgentID = binary.BigEndian.Uint16(udpPacket[chunkBodyStart:chunkBodyEnd])
+			}
 		case KeepAliveTimer:
-			hepMsg.KeepAliveTimer = binary.BigEndian.Uint16(chunkBody)
+			if chunkBodyEnd-chunkBodyStart >= 2 {
+				hepMsg.KeepAliveTimer = binary.BigEndian.Uint16(udpPacket[chunkBodyStart:chunkBodyEnd])
+			}
 		case AuthenticationKey:
-			hepMsg.AuthenticateKey = string(chunkBody)
+			hepMsg.AuthenticateKey = string(udpPacket[chunkBodyStart:chunkBodyEnd])
 		case PacketPayload:
-			hepMsg.Body += string(chunkBody)
-			if len(chunkBody) > 24 {
-				hepMsg.SipMsg = sipparser.ParseMsg(string(chunkBody))
+			// Avoid frequent string concatenation operations
+			payloadStr := string(udpPacket[chunkBodyStart:chunkBodyEnd])
+			hepMsg.Body = payloadStr
+
+			if len(payloadStr) > 24 {
+				hepMsg.SipMsg = sipparser.ParseMsg(payloadStr)
 				if hepMsg.SipMsg.Error != nil {
 					return hepMsg.SipMsg.Error
 				}
 			}
 		case CompressedPayload:
+			// Not processing
 		case InternalC:
+			// Not processing
 		default:
+			// Not processing
 		}
 		currentByte += chunkLength
 	}
