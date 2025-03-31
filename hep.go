@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"net"
+	"sync"
 
 	"github.com/james4e/sipparser"
 )
@@ -130,6 +131,23 @@ func NewHepMsg(packet []byte) (hMsg *HepMsg, err error) {
 	return newHepMsg, nil
 }
 
+// 创建对象池来复用内存
+var (
+	// IP地址缓冲池
+	ipBufferPool = sync.Pool{
+		New: func() interface{} {
+			return make([]byte, 16) // IPv6最大长度
+		},
+	}
+
+	// 通用缓冲池
+	bufferPool = sync.Pool{
+		New: func() interface{} {
+			return make([]byte, 0, 4096) // 4KB初始容量
+		},
+	}
+)
+
 func (hepMsg *HepMsg) parse(udpPacket []byte) error {
 	switch udpPacket[0] {
 	case 0x01:
@@ -143,6 +161,7 @@ func (hepMsg *HepMsg) parse(udpPacket []byte) error {
 		return err
 	}
 }
+
 func (hepMsg *HepMsg) parseHep1(udpPacket []byte) error {
 	//var err error
 	if len(udpPacket) < 21 {
@@ -193,42 +212,40 @@ func (hepMsg *HepMsg) parseHep2(udpPacket []byte) error {
 }
 
 func (hepMsg *HepMsg) parseHep3(udpPacket []byte) error {
-	// Check if packet length is sufficient
 	if len(udpPacket) < 6 {
 		return errors.New("HEP3 packet length is insufficient")
 	}
 
 	length := binary.BigEndian.Uint16(udpPacket[4:6])
-
-	// Validate packet length
 	if uint16(len(udpPacket)) < length {
 		return errors.New("HEP3 packet length is less than declared length")
 	}
 
 	currentByte := uint16(6)
 
+	// 从对象池获取缓冲区
+	payload := bufferPool.Get().([]byte)
+	defer bufferPool.Put(payload) // 确保缓冲区返回池中
+
+	ipBuf := ipBufferPool.Get().([]byte)
+	defer ipBufferPool.Put(ipBuf) // 确保IP缓冲区返回池中
+
 	for currentByte < length {
-		// Check if remaining data is sufficient to read
 		if length-currentByte < 6 {
 			return errors.New("Incomplete chunk header in HEP3 packet")
 		}
 
-		// Direct index access instead of creating new slices
-		//chunkVendorId := binary.BigEndian.Uint16(udpPacket[currentByte:currentByte+2])
 		chunkType := binary.BigEndian.Uint16(udpPacket[currentByte+2 : currentByte+4])
 		chunkLength := binary.BigEndian.Uint16(udpPacket[currentByte+4 : currentByte+6])
 
-		// Validate chunk length
 		if chunkLength < 6 {
 			return errors.New("Invalid HEP3 chunk length")
 		}
 
-		// Ensure remaining data is sufficient
 		if currentByte+chunkLength > length {
 			return errors.New("HEP3 chunk exceeds packet boundary")
 		}
 
-		// Use original data segments directly instead of creating new slices
 		chunkBodyStart := currentByte + 6
 		chunkBodyEnd := currentByte + chunkLength
 
@@ -241,14 +258,22 @@ func (hepMsg *HepMsg) parseHep3(udpPacket []byte) error {
 			if chunkBodyEnd > chunkBodyStart {
 				hepMsg.IPProtocolID = udpPacket[chunkBodyStart]
 			}
-		case IP4SourceAddress:
-			hepMsg.IP4SourceAddress = net.IP(udpPacket[chunkBodyStart:chunkBodyEnd]).String()
-		case IP4DestinationAddress:
-			hepMsg.IP4DestinationAddress = net.IP(udpPacket[chunkBodyStart:chunkBodyEnd]).String()
-		case IP6SourceAddress:
-			hepMsg.IP6SourceAddress = net.IP(udpPacket[chunkBodyStart:chunkBodyEnd]).String()
-		case IP6DestinationAddress:
-			hepMsg.IP6DestinationAddress = net.IP(udpPacket[chunkBodyStart:chunkBodyEnd]).String()
+		case IP4SourceAddress, IP4DestinationAddress, IP6SourceAddress, IP6DestinationAddress:
+			// 使用IP缓冲区
+			n := copy(ipBuf, udpPacket[chunkBodyStart:chunkBodyEnd])
+			ip := net.IP(ipBuf[:n])
+
+			switch chunkType {
+			case IP4SourceAddress:
+				hepMsg.IP4SourceAddress = ip.String()
+			case IP4DestinationAddress:
+				hepMsg.IP4DestinationAddress = ip.String()
+			case IP6SourceAddress:
+				hepMsg.IP6SourceAddress = ip.String()
+			case IP6DestinationAddress:
+				hepMsg.IP6DestinationAddress = ip.String()
+			}
+
 		case SourcePort:
 			if chunkBodyEnd-chunkBodyStart >= 2 {
 				hepMsg.SourcePort = binary.BigEndian.Uint16(udpPacket[chunkBodyStart:chunkBodyEnd])
@@ -278,26 +303,34 @@ func (hepMsg *HepMsg) parseHep3(udpPacket []byte) error {
 				hepMsg.KeepAliveTimer = binary.BigEndian.Uint16(udpPacket[chunkBodyStart:chunkBodyEnd])
 			}
 		case AuthenticationKey:
-			hepMsg.AuthenticateKey = string(udpPacket[chunkBodyStart:chunkBodyEnd])
-		case PacketPayload:
-			// Avoid frequent string concatenation operations
-			payloadStr := string(udpPacket[chunkBodyStart:chunkBodyEnd])
-			hepMsg.Body = payloadStr
+			// 使用缓冲池中的缓冲区
+			n := copy(payload[:cap(payload)], udpPacket[chunkBodyStart:chunkBodyEnd])
+			hepMsg.AuthenticateKey = string(payload[:n])
 
-			if len(payloadStr) > 24 {
-				hepMsg.SipMsg = sipparser.ParseMsg(payloadStr)
-				if hepMsg.SipMsg.Error != nil {
-					return hepMsg.SipMsg.Error
+		case PacketPayload:
+			dataLen := chunkBodyEnd - chunkBodyStart
+			if dataLen > 0 {
+				// 确保缓冲区足够大
+				if cap(payload) < int(dataLen) {
+					payload = make([]byte, dataLen)
+				}
+				payload = payload[:dataLen]
+
+				copy(payload, udpPacket[chunkBodyStart:chunkBodyEnd])
+				hepMsg.Body = string(payload)
+
+				if len(payload) > 24 {
+					// 创建新的字符串，避免引用原始数据
+					bodyStr := string(payload)
+					hepMsg.SipMsg = sipparser.ParseMsg(bodyStr)
+					if hepMsg.SipMsg.Error != nil {
+						return hepMsg.SipMsg.Error
+					}
 				}
 			}
-		case CompressedPayload:
-			// Not processing
-		case InternalC:
-			// Not processing
-		default:
-			// Not processing
 		}
 		currentByte += chunkLength
 	}
+
 	return nil
 }
